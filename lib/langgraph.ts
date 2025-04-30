@@ -1,3 +1,4 @@
+// src/lib/chat.ts
 import {
   AIMessage,
   BaseMessage,
@@ -5,8 +6,7 @@ import {
   SystemMessage,
   trimMessages,
 } from "@langchain/core/messages";
-import { ChatAnthropic } from "@langchain/anthropic";
-import { ChatCohere } from "@langchain/cohere";
+import { ChatOpenAI } from "@langchain/openai";
 import {
   END,
   MessagesAnnotation,
@@ -14,175 +14,136 @@ import {
   StateGraph,
 } from "@langchain/langgraph";
 import { MemorySaver } from "@langchain/langgraph";
-// import { ToolNode } from "@langchain/langgraph/prebuilt";
-// import wxflows from "@wxflows/sdk/langchain";
-import {
-  ChatPromptTemplate,
-  MessagesPlaceholder,
-} from "@langchain/core/prompts";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
+import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
+import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
+import { getEncoding } from "js-tiktoken";
+import { z } from "zod";
 import SYSTEM_MESSAGE from "@/constants/systemMessage";
+import { youtubeTranscriptTool, googleBooksTool } from "./tools";
+import { Tiktoken } from "js-tiktoken/lite";
 
-// Trim the messages to manage conversation history
+
+// ────────────────────────
+//  1. ENV validation
+// ────────────────────────
+const Env = z
+  .object({
+    OPENAI_API_KEY: z.string().min(20),
+  })
+  .parse(process.env);
+
+// ────────────────────────
+// 2. Accurate token counter
+// ────────────────────────
+const enc = getEncoding("cl100k_base");
+const countTokens = (msgs: BaseMessage[]) =>
+  msgs.reduce((sum, m) => sum + enc.encode(String(m.content)).length, 0);
+
+// ────────────────────────
+// 3. History trimming  (1 200 tokens ⇒ prompt-cache can trigger)
+// ────────────────────────
 const trimmer = trimMessages({
-  maxTokens: 10,
+  maxTokens: 1200,
   strategy: "last",
-  tokenCounter: (msgs) => msgs.length,
+  tokenCounter: countTokens,
   includeSystem: true,
   allowPartial: false,
   startOn: "human",
 });
 
-// Commented out wxflows tool connection
-/*
-const toolClient = new wxflows({
-  endpoint: process.env.WXFLOWS_ENDPOINT || "",
-  apikey: process.env.WXFLOWS_APIKEY,
-});
-const tools = await toolClient.lcTools;
+// ────────────────────────
+// 4. Summariser (stable prefix)
+// ────────────────────────
+async function summarizeHistory(msgs: BaseMessage[]): Promise<string> {
+  const text = msgs
+    .filter((m) => m instanceof HumanMessage || m instanceof AIMessage)
+    .map((m) => `${m._getType()}: ${m.content}`)
+    .join("\n");
+  const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 4_096 });
+  const chunks = await splitter.createDocuments([text]);
+  return chunks.length
+    ? `Previous session summary:\n${chunks[0].pageContent}`
+    : "";
+}
+
+// ────────────────────────
+// 5. Local tools
+// ────────────────────────
+const tools = [youtubeTranscriptTool, googleBooksTool];
 const toolNode = new ToolNode(tools);
-*/
 
-// Connect to the LLM provider
-// const initialiseModel = () => {
-//   const model = new ChatAnthropic({
-//     modelName: "claude-3-5-sonnet-20241022",
-//     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-//     temperature: 0.7,
-//     maxTokens: 4096,
-//     streaming: true,
-//     clientOptions: {
-//       defaultHeaders: {
-//         "anthropic-beta": "prompt-caching-2024-07-31",
-//       },
-//     },
-//     callbacks: [
-//       {
-//         handleLLMStart: async () => {
-//           // console.log("🤖 Starting LLM call");
-//         },
-//         handleLLMEnd: async (output) => {
-//           console.log("🤖 End LLM call", output);
-//           const usage = output.llmOutput?.usage;
-//           if (usage) {
-//             // console.log("📊 Token Usage:", { ... });
-//           }
-//         },
-//         // handleLLMNewToken: async (token: string) => {},
-//       },
-//     ],
-//   });
+// ────────────────────────
+// 6. LLM (with retries / timeout)
+// ────────────────────────
+const model = new ChatOpenAI({
+  model: "gpt-4o-mini-2024-07-18",
+  apiKey: Env.OPENAI_API_KEY,
+  temperature: 0.7,
+  maxTokens: 4096,
+  streaming: true,
+  timeout: 30_000,
+  maxRetries: 3,
+})
+  .bindTools(tools)
+  .withConfig({ runName: "assistant" });
 
-//   // .bindTools(tools) is removed because no tools
-//   return model;
-// };
-
-const initialiseModel = () => {
-  const model = new ChatCohere({
-    apiKey: process.env.COHERE_API_KEY,   // NEW – env-var name
-    model: "command-r-plus",              // e.g. "command-r" | "command-r-plus"
-    temperature: 0.7,
-    streaming: true,                      // token-level streaming supported ✔
-    // Cohere-specific call options can be passed per-call or here via
-    // `defaultOptions`, e.g. { max_tokens: 4096, connectors: ["web-search"] }
-    callbacks: [
-      {
-        handleLLMStart: async () => {/* … */},
-        handleLLMEnd: async (output) => {
-          console.log("🤖 End LLM call", output);
-          // token usage is in `output.llmOutput?.estimatedTokenUsage`
-        },
-      },
-    ],
-  });
-
-  return model;
-};
-
-
-
-// Define the function that determines whether to continue or not
+// ────────────────────────
+// 7. Graph helpers
+// ────────────────────────
 function shouldContinue(state: typeof MessagesAnnotation.State) {
-  const messages = state.messages;
-  const lastMessage = messages[messages.length - 1] as AIMessage;
-
-  // Pure LLM: no tool routing
-  // if (lastMessage.tool_calls?.length) {
-  //   return "tools";
-  // }
-  if (lastMessage.content && lastMessage._getType() === "tool") {
-    return "agent";
-  }
-
+  const last = state.messages.at(-1) as AIMessage;
+  if (last.tool_calls?.length) return "tools";
+  if (last.content && last._getType() === "tool") return "agent";
   return END;
 }
 
-// Define a new graph
-const createWorkflow = () => {
-  const model = initialiseModel();
+// ────────────────────────
+// 8. Graph (singleton)
+// ────────────────────────
+let app: Awaited<ReturnType<typeof compileWorkflow>>;
 
-  return new StateGraph(MessagesAnnotation)
+async function compileWorkflow() {
+  const summaryBlock = new SystemMessage(await summarizeHistory([]));
+
+  const graph = new StateGraph(MessagesAnnotation)
     .addNode("agent", async (state) => {
-      const systemContent = SYSTEM_MESSAGE;
+      const trimmed = await trimmer.invoke(state.messages);
 
       const promptTemplate = ChatPromptTemplate.fromMessages([
-        new SystemMessage(systemContent, {
-          cache_control: { type: "ephemeral" },
-        }),
+        new SystemMessage(SYSTEM_MESSAGE),
+        summaryBlock, // stable  block → helps caching
         new MessagesPlaceholder("messages"),
       ]);
 
-      const trimmedMessages = await trimmer.invoke(state.messages);
-      const prompt = await promptTemplate.invoke({ messages: trimmedMessages });
-
+      const prompt = await promptTemplate.invoke({ messages: trimmed });
       const response = await model.invoke(prompt);
-
       return { messages: [response] };
     })
-    // .addNode("tools", toolNode)  // removed tool node
+    .addNode("tools", toolNode)
     .addEdge(START, "agent")
-    .addConditionalEdges("agent", shouldContinue);
-    // .addEdge("tools", "agent"); // no tool backedge
-};
+    .addConditionalEdges("agent", shouldContinue)
+    .addEdge("tools", "agent");
 
-function addCachingHeaders(messages: BaseMessage[]): BaseMessage[] {
-  if (!messages.length) return messages;
-  const cachedMessages = [...messages];
-
-  const addCache = (message: BaseMessage) => {
-    message.content = [
-      {
-        type: "text",
-        text: message.content as string,
-        cache_control: { type: "ephemeral" },
-      },
-    ];
-  };
-
-  addCache(cachedMessages.at(-1)!);
-
-  let humanCount = 0;
-  for (let i = cachedMessages.length - 1; i >= 0; i--) {
-    if (cachedMessages[i] instanceof HumanMessage) {
-      humanCount++;
-      if (humanCount === 2) {
-        addCache(cachedMessages[i]);
-        break;
-      }
-    }
-  }
-
-  return cachedMessages;
+  return graph.compile({ checkpointer: new MemorySaver() });
 }
 
-export async function submitQuestion(messages: BaseMessage[], chatId: string) {
-  const cachedMessages = addCachingHeaders(messages);
+// ────────────────────────
+// 9. Public entry
+// ────────────────────────
+export async function submitQuestion(
+  messages: BaseMessage[],
+  chatId: string
+) {
+  if (!app) app = await compileWorkflow();
 
-  const workflow = createWorkflow();
-  const checkpointer = new MemorySaver();
-  const app = workflow.compile({ checkpointer });
+  /* ─ Optional: LangChain request-level cache
+  import { cache } from "@langchain/core";
+  cache.setStore(new InMemoryCache({ ttl: 3600 }));
+  */
 
-  const stream = await app.streamEvents(
-    { messages: cachedMessages },
+  return app.streamEvents(
+    { messages },
     {
       version: "v2",
       configurable: { thread_id: chatId },
@@ -190,5 +151,4 @@ export async function submitQuestion(messages: BaseMessage[], chatId: string) {
       runId: chatId,
     }
   );
-  return stream;
 }
