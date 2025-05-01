@@ -1,4 +1,4 @@
-import { submitQuestion } from "@/lib/langgraph";
+import { submitQuestion } from "@/lib/chat";
 import { api } from "@/convex/_generated/api";
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";

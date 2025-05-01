@@ -18,7 +18,7 @@ export const list = query({
       .collect();
 
     if (SHOW_COMMENTS) {
-      console.log("📜 Retrieved messages:", {
+      console.log("Retrieved messages:", {
         chatId: args.chatId,
         count: messages.length,
       });
@@ -35,7 +35,7 @@ export const send = mutation({
   },
   handler: async (ctx, args) => {
     if (SHOW_COMMENTS) {
-      console.log("📤 Sending message:", {
+      console.log("Sending message:", {
         chatId: args.chatId,
         content: args.content,
       });
@@ -60,7 +60,7 @@ export const send = mutation({
     });
 
     if (SHOW_COMMENTS) {
-      console.log("✅ Saved user message:", {
+      console.log("Saved user message:", {
         messageId,
         chatId: args.chatId,
       });
@@ -78,7 +78,7 @@ export const store = mutation({
   },
   handler: async (ctx, args) => {
     if (SHOW_COMMENTS) {
-      console.log("💾 Storing message:", {
+      console.log("Storing message:", {
         chatId: args.chatId,
         role: args.role,
         contentLength: args.content.length,
@@ -97,7 +97,7 @@ export const store = mutation({
     });
 
     if (SHOW_COMMENTS) {
-      console.log("✅ Stored message:", {
+      console.log("Stored message:", {
         messageId,
         chatId: args.chatId,
         role: args.role,

@@ -3,6 +3,8 @@
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useUser } from "@clerk/nextjs";
 import { BotIcon } from "lucide-react";
+import { marked } from "marked";
+import sanitizeHtml from "sanitize-html";
 
 interface MessageBubbleProps {
   content: string;
@@ -10,17 +12,35 @@ interface MessageBubbleProps {
 }
 
 const formatMessage = (content: string): string => {
-  // First unescape backslashes
+  // Unescape backslashes
   content = content.replace(/\\\\/g, "\\");
 
-  // Then handle newlines
+  // Convert escaped newlines
   content = content.replace(/\\n/g, "\n");
 
-  // Remove only the markers but keep the content between them
+  // Remove custom markers
   content = content.replace(/---START---\n?/g, "").replace(/\n?---END---/g, "");
 
-  // Trim any extra whitespace that might be left
   return content.trim();
+};
+
+const renderSafeHTML = (content: string): string => {
+  const rawMarkdown = formatMessage(content);
+
+  // Convert markdown to HTML
+  const html = marked.parse(rawMarkdown);
+
+  // Sanitize the result, allowing basic HTML and custom classes
+  const clean = sanitizeHtml(html, {
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img", "h1", "h2", "span"]),
+    allowedAttributes: {
+      "*": ["style", "class"],
+      a: ["href", "name", "target", "rel"],
+      img: ["src", "alt", "width", "height"],
+    },
+  });
+
+  return clean;
 };
 
 export function MessageBubble({ content, isUser }: MessageBubbleProps) {
@@ -35,9 +55,10 @@ export function MessageBubble({ content, isUser }: MessageBubbleProps) {
             : "bg-white text-gray-900 rounded-bl-none ring-gray-200"
         }`}
       >
-        <div className="whitespace-pre-wrap text-[15px] leading-relaxed">
-          <div dangerouslySetInnerHTML={{ __html: formatMessage(content) }} />
-        </div>
+        <div
+          className="whitespace-pre-wrap text-[15px] leading-snug"
+          dangerouslySetInnerHTML={{ __html: renderSafeHTML(content) }}
+        />
         <div
           className={`absolute bottom-0 ${
             isUser

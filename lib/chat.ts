@@ -20,12 +20,10 @@ import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 import SYSTEM_MESSAGE from "@/constants/systemMessage";
-import { youtubeTranscriptTool, googleBooksTool } from "./tools";
-import { Tiktoken } from "js-tiktoken/lite";
-
+import { bistroBotTools } from "@/lib/tools";
 
 // ────────────────────────
-//  1. ENV validation
+// 1. ENV validation
 // ────────────────────────
 const Env = z
   .object({
@@ -34,14 +32,14 @@ const Env = z
   .parse(process.env);
 
 // ────────────────────────
-// 2. Accurate token counter
+// 2. Token counter
 // ────────────────────────
 const enc = getEncoding("cl100k_base");
 const countTokens = (msgs: BaseMessage[]) =>
   msgs.reduce((sum, m) => sum + enc.encode(String(m.content)).length, 0);
 
 // ────────────────────────
-// 3. History trimming  (1 200 tokens ⇒ prompt-cache can trigger)
+// 3. History trimmer
 // ────────────────────────
 const trimmer = trimMessages({
   maxTokens: 1200,
@@ -53,7 +51,7 @@ const trimmer = trimMessages({
 });
 
 // ────────────────────────
-// 4. Summariser (stable prefix)
+// 4. Summarizer
 // ────────────────────────
 async function summarizeHistory(msgs: BaseMessage[]): Promise<string> {
   const text = msgs
@@ -68,13 +66,13 @@ async function summarizeHistory(msgs: BaseMessage[]): Promise<string> {
 }
 
 // ────────────────────────
-// 5. Local tools
+// 5. Tools
 // ────────────────────────
-const tools = [youtubeTranscriptTool, googleBooksTool];
+const tools = bistroBotTools;
 const toolNode = new ToolNode(tools);
 
 // ────────────────────────
-// 6. LLM (with retries / timeout)
+// 6. LLM
 // ────────────────────────
 const model = new ChatOpenAI({
   model: "gpt-4o-mini-2024-07-18",
@@ -89,11 +87,11 @@ const model = new ChatOpenAI({
   .withConfig({ runName: "assistant" });
 
 // ────────────────────────
-// 7. Graph helpers
+// 7. Graph logic
 // ────────────────────────
 function shouldContinue(state: typeof MessagesAnnotation.State) {
   const last = state.messages.at(-1) as AIMessage;
-  if (last.tool_calls?.length) return "tools";
+  if (last.tool_calls?.length) return "narrator";
   if (last.content && last._getType() === "tool") return "agent";
   return END;
 }
@@ -112,7 +110,7 @@ async function compileWorkflow() {
 
       const promptTemplate = ChatPromptTemplate.fromMessages([
         new SystemMessage(SYSTEM_MESSAGE),
-        summaryBlock, // stable  block → helps caching
+        summaryBlock,
         new MessagesPlaceholder("messages"),
       ]);
 
@@ -120,27 +118,41 @@ async function compileWorkflow() {
       const response = await model.invoke(prompt);
       return { messages: [response] };
     })
+
+    .addNode("narrator", async (state) => {
+      const last = state.messages.at(-1) as AIMessage;
+      const toolCall = last.tool_calls?.[0];
+      const name = toolCall?.name;
+      const args = toolCall?.args;
+
+      let message = "Using tool...";
+      if (name === "availability" && args?.date) {
+        message = `Let me check availability for ${args.date}...`;
+      } else if (name === "createReservation") {
+        message = `Let me try to book your reservation...`;
+      }
+
+      return { messages: [new AIMessage({ content: message })] };
+    })
+
     .addNode("tools", toolNode)
+
     .addEdge(START, "agent")
     .addConditionalEdges("agent", shouldContinue)
+    .addEdge("narrator", "tools")
     .addEdge("tools", "agent");
 
   return graph.compile({ checkpointer: new MemorySaver() });
 }
 
 // ────────────────────────
-// 9. Public entry
+// 9. Public entry point
 // ────────────────────────
 export async function submitQuestion(
   messages: BaseMessage[],
   chatId: string
 ) {
   if (!app) app = await compileWorkflow();
-
-  /* ─ Optional: LangChain request-level cache
-  import { cache } from "@langchain/core";
-  cache.setStore(new InMemoryCache({ ttl: 3600 }));
-  */
 
   return app.streamEvents(
     { messages },
