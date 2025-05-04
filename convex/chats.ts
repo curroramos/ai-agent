@@ -75,7 +75,7 @@ export const getChat = query({
 
       // Return null if chat doesn't exist or user is not authorized
       if (!chat || chat.userId !== args.userId) {
-        console.log("❌ Chat not found or unauthorized", {
+        console.log("Chat not found or unauthorized", {
           chatExists: !!chat,
           chatUserId: chat?.userId,
           requestUserId: args.userId,
@@ -83,10 +83,10 @@ export const getChat = query({
         return null;
       }
 
-      console.log("✅ Chat found and authorized");
+      console.log("Chat found and authorized");
       return chat;
     } catch (error) {
-      console.error("🔥 Error in getChat:", error);
+      console.error("Error in getChat:", error);
       return null;
     }
   },

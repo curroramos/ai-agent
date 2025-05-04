@@ -23,7 +23,7 @@ import SYSTEM_MESSAGE from "@/constants/systemMessage";
 import { bistroBotTools } from "@/lib/tools";
 
 // ────────────────────────
-// 1. ENV validation
+//  1. ENV validation
 // ────────────────────────
 const Env = z
   .object({
@@ -32,14 +32,14 @@ const Env = z
   .parse(process.env);
 
 // ────────────────────────
-// 2. Token counter
+// 2. Accurate token counter
 // ────────────────────────
 const enc = getEncoding("cl100k_base");
 const countTokens = (msgs: BaseMessage[]) =>
   msgs.reduce((sum, m) => sum + enc.encode(String(m.content)).length, 0);
 
 // ────────────────────────
-// 3. History trimmer
+// 3. History trimming  (1 200 tokens ⇒ prompt-cache can trigger)
 // ────────────────────────
 const trimmer = trimMessages({
   maxTokens: 1200,
@@ -51,7 +51,7 @@ const trimmer = trimMessages({
 });
 
 // ────────────────────────
-// 4. Summarizer
+// 4. Summariser (stable prefix)
 // ────────────────────────
 async function summarizeHistory(msgs: BaseMessage[]): Promise<string> {
   const text = msgs
@@ -66,13 +66,13 @@ async function summarizeHistory(msgs: BaseMessage[]): Promise<string> {
 }
 
 // ────────────────────────
-// 5. Tools
+// 5. Local tools
 // ────────────────────────
 const tools = bistroBotTools;
 const toolNode = new ToolNode(tools);
 
 // ────────────────────────
-// 6. LLM
+// 6. LLM (with retries / timeout)
 // ────────────────────────
 const model = new ChatOpenAI({
   model: "gpt-4o-mini-2024-07-18",
@@ -87,11 +87,11 @@ const model = new ChatOpenAI({
   .withConfig({ runName: "assistant" });
 
 // ────────────────────────
-// 7. Graph logic
+// 7. Graph helpers
 // ────────────────────────
 function shouldContinue(state: typeof MessagesAnnotation.State) {
   const last = state.messages.at(-1) as AIMessage;
-  if (last.tool_calls?.length) return "narrator";
+  if (last.tool_calls?.length) return "tools";
   if (last.content && last._getType() === "tool") return "agent";
   return END;
 }
@@ -110,7 +110,7 @@ async function compileWorkflow() {
 
       const promptTemplate = ChatPromptTemplate.fromMessages([
         new SystemMessage(SYSTEM_MESSAGE),
-        summaryBlock,
+        summaryBlock, // stable  block → helps caching
         new MessagesPlaceholder("messages"),
       ]);
 
@@ -118,41 +118,27 @@ async function compileWorkflow() {
       const response = await model.invoke(prompt);
       return { messages: [response] };
     })
-
-    .addNode("narrator", async (state) => {
-      const last = state.messages.at(-1) as AIMessage;
-      const toolCall = last.tool_calls?.[0];
-      const name = toolCall?.name;
-      const args = toolCall?.args;
-
-      let message = "Using tool...";
-      if (name === "availability" && args?.date) {
-        message = `Let me check availability for ${args.date}...`;
-      } else if (name === "createReservation") {
-        message = `Let me try to book your reservation...`;
-      }
-
-      return { messages: [new AIMessage({ content: message })] };
-    })
-
     .addNode("tools", toolNode)
-
     .addEdge(START, "agent")
     .addConditionalEdges("agent", shouldContinue)
-    .addEdge("narrator", "tools")
     .addEdge("tools", "agent");
 
   return graph.compile({ checkpointer: new MemorySaver() });
 }
 
 // ────────────────────────
-// 9. Public entry point
+// 9. Public entry
 // ────────────────────────
 export async function submitQuestion(
   messages: BaseMessage[],
   chatId: string
 ) {
   if (!app) app = await compileWorkflow();
+
+  /* ─ Optional: LangChain request-level cache
+  import { cache } from "@langchain/core";
+  cache.setStore(new InMemoryCache({ ttl: 3600 }));
+  */
 
   return app.streamEvents(
     { messages },
